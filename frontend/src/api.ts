@@ -117,6 +117,9 @@ export interface ExcelPlan {
   aggregations?: Array<{ field: string; func?: string }>
   output_columns?: string[]
   expression?: string
+  sort_by?: Array<{ field: string; order?: string }>
+  order?: string
+  limit?: number
   ambiguities?: string[]
   plan_desc?: string
 }

@@ -201,6 +201,98 @@ def _groupby(df: pd.DataFrame, plan: dict[str, Any]) -> pd.DataFrame:
     return df.groupby(group_by, dropna=False).size().reset_index(name="count")
 
 
+_SORT_DESC = {"desc", "descending", "false", "降序", "倒序", "由高到低", "由大到小", "从大到小"}
+_SORT_ASC = {"asc", "ascending", "true", "升序", "正序", "由低到高", "由小到大", "从小到大"}
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _default_ascending(plan: dict[str, Any]) -> bool:
+    """取计划里的全局排序方向，默认升序。"""
+    flag = plan.get("ascending")
+    if isinstance(flag, bool):
+        return flag
+    text = str(plan.get("order") or plan.get("direction") or "").strip().casefold()
+    return text not in _SORT_DESC
+
+
+def _sort_specs(plan: dict[str, Any]) -> list[tuple[str, str]]:
+    """解析排序计划：支持 [{"field","order"}]、["费用 desc"]、["费用"] 等写法。"""
+    raw = (
+        plan.get("sort_by")
+        or plan.get("order_by")
+        or plan.get("sort")
+        or plan.get("sort_keys")
+        or []
+    )
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    specs: list[tuple[str, str]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            field = str(
+                item.get("field") or item.get("column") or item.get("name") or ""
+            ).strip()
+            order = str(
+                item.get("order") or item.get("direction") or item.get("ascending") or ""
+            ).strip().casefold()
+        else:
+            parts = str(item).replace("：", " ").replace(":", " ").split()
+            field = parts[0] if parts else ""
+            order = parts[-1].casefold() if len(parts) > 1 else ""
+        if field:
+            specs.append((field, order))
+    return specs
+
+
+def _sort(df: pd.DataFrame, plan: dict[str, Any]) -> pd.DataFrame:
+    """按计划排序；支持多列、升降序混排、取前 N 行。"""
+    specs = _sort_specs(plan)
+    available = [str(c) for c in df.columns]
+    if not specs:
+        raise ValueError(f"排序操作缺少排序列（sort_by）。可用列: {available}")
+
+    missing = [f for f, _ in specs if f not in df.columns]
+    if missing:
+        raise ValueError(f"排序列不存在: {missing}。可用列: {available}")
+
+    default_asc = _default_ascending(plan)
+    columns: list[str] = []
+    ascending: list[bool] = []
+    for field, order in specs:
+        columns.append(field)
+        if order in _SORT_DESC:
+            ascending.append(False)
+        elif order in _SORT_ASC:
+            ascending.append(True)
+        else:
+            ascending.append(default_asc)
+
+    work = df.copy()
+    # 文本型数字（如「1,200」「¥300」）按数值排序更符合直觉
+    for col in columns:
+        if work[col].dtype == object:
+            numeric = pd.to_numeric(
+                work[col].astype(str).str.replace(r"[,，¥￥\s]", "", regex=True),
+                errors="coerce",
+            )
+            if numeric.notna().sum() >= max(1, int(work[col].notna().sum() * 0.8)):
+                work[col] = numeric
+
+    result = work.sort_values(
+        by=columns, ascending=ascending, kind="mergesort", na_position="last"
+    )
+    limit = _to_int(plan.get("limit") or plan.get("top_n") or plan.get("n"))
+    if limit and limit > 0:
+        result = result.head(limit)
+    return result.reset_index(drop=True)
+
+
 _ACTION_ALIASES = {
     "groupby": "groupby", "group_by": "groupby", "aggregate": "groupby",
     "summarize": "groupby", "summary": "groupby",
@@ -210,6 +302,9 @@ _ACTION_ALIASES = {
     "筛选": "filter", "过滤": "filter", "查询": "filter",
     "pivot": "pivot", "pivot_table": "pivot", "透视": "pivot", "透视图": "pivot",
     "describe": "describe", "描述": "describe", "概览": "describe",
+    "sort": "sort", "sort_values": "sort", "order_by": "sort", "orderby": "sort",
+    "order": "sort", "arrange": "sort", "rank": "sort",
+    "排序": "sort", "升序": "sort", "降序": "sort", "排名": "sort",
 }
 
 
@@ -219,7 +314,7 @@ def execute_plan(
     """按 LLM 生成的处理计划执行数据操作。
 
     file_dfs: {文件名 或 文件名::sheet名: DataFrame}
-    支持的 action: groupby / merge / filter / pivot / describe
+    支持的 action: groupby / merge / filter / pivot / describe / sort
     """
     raw_action = str(plan.get("action") or "groupby").strip()
     action = _ACTION_ALIASES.get(raw_action.casefold(), raw_action.casefold())
@@ -265,6 +360,9 @@ def execute_plan(
                 return _groupby(df, plan)
             return df
         return _apply_filter(df, expr)
+
+    if action == "sort":
+        return _sort(df, plan)
 
     if action == "pivot":
         index = [str(i) for i in (plan.get("group_by") or []) if str(i) in df.columns]

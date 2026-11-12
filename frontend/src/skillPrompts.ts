@@ -9,13 +9,15 @@ export const EXCEL_PLAN_SYSTEM_PROMPT = `你是数据分析助手。用户上传
 
 请严格输出一个 JSON 对象（不要输出其他文字），结构如下：
 {
-  "action": "groupby | merge | filter | pivot | describe",
+  "action": "groupby | merge | filter | pivot | describe | sort",
   "files_involved": ["文件名.xlsx::sheet名", ...],
   "join_keys": ["关联字段", ...],
   "group_by": ["分组维度字段", ...],
   "aggregations": [{"field": "字段名", "func": "sum|mean|count|max|min"}],
   "output_columns": ["新表列名", ...],
   "expression": "仅 action=filter 时填写，如 费用 > 100",
+  "sort_by": [{"field": "排序字段", "order": "asc|desc"}],
+  "limit": 10,
   "ambiguities": ["需求不明确点"],
   "plan_desc": "一句话向用户回显的处理计划"
 }
@@ -27,8 +29,11 @@ export const EXCEL_PLAN_SYSTEM_PROMPT = `你是数据分析助手。用户上传
 - 多文件关联时 action 用 merge，join_keys 填公共字段
 - 单 sheet 文件的 files_involved 用文件名，多 sheet 文件用 "文件名::sheet名"
 - action 必须与需求匹配：要按维度统计/汇总就用 groupby（填 group_by + aggregations）；
-  只要求筛选明细行才用 filter
+  只要求筛选明细行才用 filter；只要求按某列排序/取前 N 条就用 sort
 - expression 仅在 action=filter 时填写，其余动作省略该字段；禁止写 "True" 这类占位值
+- sort 的用法：sort_by 填 [{"field":"费用","order":"asc"}]，多列排序按优先级依次列出；
+  用户说"前10/最高的10条/TOP N"时填 limit=N（默认按该列降序）
+- 系统已支持排序，不要回答"暂不支持排序"
 - expression 只写列名与数值/字符串的比较组合，例如 销售额 > 100 或 地区 == "华东"；
   不要写 df[...] / df.列名，不要写代码块
 - 只能使用数据概况中真实存在的列名，不要臆造字段`
