@@ -41,3 +41,8 @@ venv/
 *.tmp
 *.swp
 .cache/
+
+# 项目数据（上传/生成的 Excel、数据库、服务日志）
+backend/data/
+server.log
+dev.log

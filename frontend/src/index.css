@@ -1,0 +1,52 @@
+body {
+  margin: 0;
+  font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: #f5f6fa;
+}
+
+#root {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.chat-box {
+  height: 480px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.msg {
+  margin-bottom: 12px;
+  display: flex;
+}
+
+.msg.user {
+  justify-content: flex-end;
+}
+
+.msg .bubble {
+  max-width: 75%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14px;
+}
+
+.msg.user .bubble {
+  background: #1f6fb2;
+  color: #fff;
+  border-top-right-radius: 2px;
+}
+
+.msg.assistant .bubble {
+  background: #f0f2f5;
+  color: #222;
+  border-top-left-radius: 2px;
+}
