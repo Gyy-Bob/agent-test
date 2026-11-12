@@ -46,6 +46,22 @@ def load_dataframes(path: Path) -> list[tuple[str, pd.DataFrame]]:
     raise ValueError(f"不支持的文件类型: {suffix}")
 
 
+def build_file_dfs(paths: list[Path]) -> dict[str, pd.DataFrame]:
+    """把多个文件载入为 {文件名 或 文件名::sheet名: DataFrame}。
+
+    key 规则与 profile_file 的概况一一对应，供 execute_plan 按
+    files_involved 定位（多 sheet 文件用 "文件.xlsx::sheet名"，单 sheet 用文件名）。
+    """
+    result: dict[str, pd.DataFrame] = {}
+    for p in paths:
+        loaded = load_dataframes(p)
+        multi = len(loaded) > 1
+        for sheet_name, df in loaded:
+            key = f"{p.name}::{sheet_name}" if multi else p.name
+            result[key] = df
+    return result
+
+
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(how="all").dropna(axis=1, how="all")
     return df.rename(columns=lambda c: str(c).strip())

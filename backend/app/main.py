@@ -1,4 +1,8 @@
-"""agent-test 后端入口。启动: uvicorn app.main:app --reload"""
+"""agent-test 后端入口。启动: uvicorn app.main:app --reload
+
+LLM 调用由前端通过 WorkBuddy 云服务 SDK 免密钥完成；
+后端负责对话历史持久化与 Excel 数据处理。
+"""
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,10 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes_chat import router as chat_router
 from app.api.routes_excel import router as excel_router
 from app.core.config import settings
-from app.core.llm import llm_client
 from app.db.session import init_db
 
-app = FastAPI(title="agent-test", version="0.1.0")
+app = FastAPI(title="agent-test", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +35,6 @@ def startup() -> None:
 def health():
     return {
         "status": "ok",
-        "llm_configured": llm_client.configured,
-        "llm_model": llm_client.model,
+        "llm_mode": "cloud (前端云 SDK 免密钥调用)",
         "storage": settings.storage_backend,
     }

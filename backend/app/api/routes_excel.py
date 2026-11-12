@@ -1,43 +1,43 @@
-"""F2：Excel 导入汇总接口。
+"""F2：Excel 导入汇总接口（LLM 由前端云 SDK 调用，后端只做数据处理）。
 
-- POST /api/excel/summarize  上传 1~N 个文件 + 自然语言需求 → 汇总结果
-- GET  /api/excel/download/{filename}  下载生成的新 Excel
+流程：前端上传文件 → 后端解析返回数据概况 → 前端用云 LLM 生成 JSON 计划
+     → 前端提交计划 → 后端 pandas 执行并生成新 xlsx → 前端下载
 """
 
+import json
 import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.models import ExcelTask
 from app.db.session import get_db
-from app.skills.excel_summary.skill import excel_summary_skill
+from app.services import excel_service
 
 router = APIRouter(prefix="/api/excel", tags=["excel"])
 
 ALLOWED_SUFFIX = {".xlsx", ".xls", ".csv"}
 
 
-@router.post("/summarize")
-async def summarize(
-    query: str = Form(...),
+@router.post("/upload")
+async def upload(
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    """保存上传文件并返回数据概况（供前端拼装 LLM 提示词）。"""
     if not files:
         raise HTTPException(400, "请至少上传一个文件")
-    if not query.strip():
-        raise HTTPException(400, "请描述汇总需求")
 
-    # 校验并保存上传文件
-    saved_paths: list[Path] = []
     task_id = uuid.uuid4().hex[:12]
     task_dir = settings.uploads_dir / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[Path] = []
     for f in files:
         suffix = Path(f.filename or "").suffix.lower()
         if suffix not in ALLOWED_SUFFIX:
@@ -47,44 +47,89 @@ async def summarize(
             shutil.copyfileobj(f.file, out)
         saved_paths.append(dest)
 
-    task = ExcelTask(id=task_id, user_query=query, input_files="[]", status="processing")
+    # 解析数据概况
+    try:
+        profiles = [excel_service.profile_file(p) for p in saved_paths]
+    except Exception as e:
+        raise HTTPException(400, f"文件解析失败: {e}") from e
+
+    task = ExcelTask(
+        id=task_id,
+        user_query="",
+        input_files=json.dumps([str(p) for p in saved_paths], ensure_ascii=False),
+        status="uploaded",
+    )
     db.add(task)
+    db.commit()
 
-    # LLM 配置校验
-    from app.core.llm import llm_client
+    return {"task_id": task_id, "profiles": profiles}
 
-    if not llm_client.configured:
-        task.status = "failed"
-        task.error = "LLM 未配置"
-        db.commit()
-        raise HTTPException(503, "LLM 未配置：请复制 .env.example 为 .env 并填写 LLM_API_KEY")
+
+class ExecuteRequest(BaseModel):
+    task_id: str
+    query: str
+    plan: dict
+
+
+@router.post("/execute")
+def execute(req: ExecuteRequest, db: Session = Depends(get_db)):
+    """按前端云 LLM 生成的处理计划执行 pandas 汇总，生成新 Excel。"""
+    task = db.get(ExcelTask, req.task_id)
+    if task is None:
+        raise HTTPException(404, "任务不存在，请重新上传文件")
+
+    paths = [Path(p) for p in json.loads(task.input_files)]
+    for p in paths:
+        if not p.exists():
+            raise HTTPException(410, "上传文件已过期，请重新上传")
 
     try:
-        result = await excel_summary_skill.run(saved_paths, query)
+        file_dfs = excel_service.build_file_dfs(paths)
+        result_df = excel_service.execute_plan(req.plan, file_dfs)
+    except ValueError as e:
+        task.status = "plan_error"
+        task.error = str(e)
+        db.commit()
+        raise HTTPException(422, f"处理计划无法执行: {e}") from e
     except Exception as e:
         task.status = "failed"
         task.error = str(e)
         db.commit()
-        raise HTTPException(500, f"汇总处理失败: {e}") from e
+        raise HTTPException(500, f"数据处理失败: {e}") from e
 
-    task.input_files = str([p.name for p in saved_paths])
-    if result["status"] == "need_clarification":
-        task.status = "need_clarification"
-        task.plan_json = str(result.get("ambiguities"))
-        db.commit()
-        return {
-            "status": "need_clarification",
-            "task_id": task_id,
-            "ambiguities": result["ambiguities"],
-            "plan_desc": result.get("plan_desc", ""),
+    output_path = settings.outputs_dir / f"汇总结果_{req.task_id}.xlsx"
+    sources = [
+        {
+            "来源文件": Path(k).name,
+            "sheet": k.split("::")[-1] if "::" in k else "csv",
+            "行数": len(df),
         }
+        for k, df in file_dfs.items()
+    ]
+    log_lines = [
+        f"用户需求: {req.query}",
+        f"处理动作: {req.plan.get('action')}",
+        f"分组维度: {req.plan.get('group_by')}",
+        f"聚合方式: {req.plan.get('aggregations')}",
+        f"关联字段: {req.plan.get('join_keys')}",
+        f"输入文件: {[p.name for p in paths]}",
+        f"结果行数: {len(result_df)}",
+    ]
+    excel_service.write_result_xlsx(output_path, result_df, sources, log_lines)
 
     task.status = "done"
-    task.plan_json = str(result.get("plan"))
-    task.output_file = result["output_file"]
-    task.summary = result["summary"]
+    task.plan_json = json.dumps(req.plan, ensure_ascii=False)
+    task.output_file = output_path.name
     db.commit()
-    return result
+
+    return {
+        "task_id": req.task_id,
+        "download_url": f"/api/excel/download/{output_path.name}",
+        "output_file": output_path.name,
+        "result_rows": len(result_df),
+        "result_columns": [str(c) for c in result_df.columns],
+        "sample_rows": result_df.head(5).fillna("").astype(str).values.tolist(),
+    }
 
 
 @router.get("/download/{filename}")
