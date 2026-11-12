@@ -67,33 +67,74 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=lambda c: str(c).strip())
 
 
+def _norm(s: str) -> str:
+    """宽松匹配用：去空格/引号/全角空格，转小写。"""
+    return (
+        str(s)
+        .strip()
+        .replace('"', "")
+        .replace("'", "")
+        .replace(""", "")
+        .replace(""", "")
+        .replace("\u3000", "")
+        .replace(" ", "")
+        .casefold()
+    )
+
+
+def _resolve_frames(
+    files: list, file_dfs: dict[str, pd.DataFrame]
+) -> list[pd.DataFrame]:
+    """把计划中的文件引用解析为 DataFrame 列表，宽松匹配并给出可诊断的错误。"""
+    frames: list[pd.DataFrame] = []
+    norm_keys = {_norm(k): k for k in file_dfs}
+    norm_base = {_norm(k.split("::")[0]): k for k in file_dfs}  # 不带 sheet 后缀的键
+
+    for f in files or []:
+        f = str(f).strip()
+        if not f or "sheet名" in f or "文件名" in f:  # 模板占位符
+            continue
+        target: str | None = None
+        if "::" in f:
+            fname, sheet = f.split("::", 1)
+            target = norm_keys.get(_norm(f)) or norm_keys.get(
+                _norm(f"{fname}::{sheet.strip()}")
+            )
+            if target is None:  # sheet 名对不上时回退到文件名匹配
+                target = norm_base.get(_norm(fname))
+        else:
+            target = norm_keys.get(_norm(f)) or norm_base.get(_norm(f))
+        if target is None:  # 最后尝试包含式匹配
+            nf = _norm(f)
+            for nk, key in norm_keys.items():
+                if nf in nk or nk in nf:
+                    target = key
+                    break
+        if target is not None:
+            frames.append(_clean(file_dfs[target]))
+
+    if not frames:
+        available = list(file_dfs.keys())
+        raise ValueError(
+            f"处理计划中的文件引用无法匹配到已上传文件。"
+            f"计划引用: {files or '[]'}；实际上传: {available}。"
+            f"请在计划 files_involved 中使用实际上传的文件名后重试。"
+        )
+    return frames
+
+
 def execute_plan(
     plan: dict[str, Any], file_dfs: dict[str, pd.DataFrame]
 ) -> pd.DataFrame:
     """按 LLM 生成的处理计划执行数据操作。
 
-    file_dfs: {文件名: DataFrame}（多 sheet 时取第一个数据 sheet）
+    file_dfs: {文件名 或 文件名::sheet名: DataFrame}
     支持的 action: groupby / merge / filter / pivot / describe
     """
     action = plan.get("action", "groupby")
     files = plan.get("files_involved") or list(file_dfs.keys())
-    # sheet 级别定位：文件名带 "::sheet名" 时取指定 sheet
-    frames: list[pd.DataFrame] = []
-    for f in files:
-        f = str(f)
-        if "::" in f:
-            fname, sheet = f.split("::", 1)
-            for key, df in file_dfs.items():
-                if Path(key).name == fname and key.endswith(f"::{sheet}"):
-                    frames.append(_clean(df))
-                    break
-        else:
-            for key, df in file_dfs.items():
-                if Path(key).name == f or key == f:
-                    frames.append(_clean(df))
-                    break
-    if not frames:
-        raise ValueError("计划中的文件在已上传文件中未找到")
+    # sheet 级别定位由 _resolve_frames 处理（含 "::sheet" 与宽松匹配）
+    frames = _resolve_frames(files, file_dfs)
 
     if action == "merge" and len(frames) >= 2:
         keys = plan.get("join_keys") or []
