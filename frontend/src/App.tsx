@@ -190,11 +190,22 @@ function ExcelPanel({ models, modelId, setModelId, modelError }: ReturnType<type
       // 1. 上传解析
       setStep('正在上传并解析文件…')
       const list = files.map((f) => f.originFileObj as File).filter(Boolean)
-      const { task_id, profiles } = await uploadExcel(list)
+      let uploadResult: Awaited<ReturnType<typeof uploadExcel>>
+      try {
+        uploadResult = await uploadExcel(list)
+      } catch (e) {
+        throw new Error(`[步骤1/5 上传文件失败] ${(e as Error).message}（请确认后端服务已启动，且页面地址为 localhost:5173）`)
+      }
+      const { task_id, profiles } = uploadResult
 
       // 2. 云 LLM 生成计划
       setStep('AI 正在理解数据并生成处理计划…')
-      const plan: ExcelPlan = await generatePlan(profiles, query, modelId)
+      let plan: ExcelPlan
+      try {
+        plan = await generatePlan(profiles, query, modelId)
+      } catch (e) {
+        throw new Error(`[步骤2/5 AI生成计划失败] ${(e as Error).message}（云服务连接问题，请刷新页面重试）`)
+      }
 
       // 3. 需求不明确 → 追问
       if (plan.ambiguities && plan.ambiguities.length > 0) {
@@ -206,7 +217,12 @@ function ExcelPanel({ models, modelId, setModelId, modelError }: ReturnType<type
 
       // 4. 后端执行
       setStep('正在执行数据汇总…')
-      const execResult = await executePlan(task_id, query, plan)
+      let execResult: ExecuteResult
+      try {
+        execResult = await executePlan(task_id, query, plan)
+      } catch (e) {
+        throw new Error(`[步骤3/5 执行汇总失败] ${(e as Error).message}`)
+      }
 
       // 5. 云 LLM 生成总结
       setStep('正在生成结果总结…')
