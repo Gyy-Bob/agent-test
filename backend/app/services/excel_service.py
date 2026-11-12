@@ -173,6 +173,46 @@ def _norm_agg_func(func: Any) -> str:
     return _AGG_ALIASES.get(key, "sum")
 
 
+_NOOP_EXPRESSIONS = {"true", "false", "none", "null", "1=1", "1 == 1", "全部", "all"}
+
+
+def _groupby(df: pd.DataFrame, plan: dict[str, Any]) -> pd.DataFrame:
+    """按计划执行分组聚合。"""
+    group_by = [str(g) for g in (plan.get("group_by") or [])]
+    if not group_by:
+        raise ValueError(
+            f"分组汇总缺少 group_by 维度。可用列: {[str(c) for c in df.columns]}"
+        )
+    agg_map: dict[str, str] = {}
+    for item in plan.get("aggregations", []) or []:
+        if isinstance(item, dict):
+            agg_map[str(item.get("field", ""))] = _norm_agg_func(item.get("func", "sum"))
+        else:
+            agg_map[str(item)] = "sum"
+    agg_map.pop("", None)
+    group_by = [g for g in group_by if g in df.columns]
+    agg_map = {k: v for k, v in agg_map.items() if k in df.columns}
+    if not group_by:
+        raise ValueError(
+            f"分组维度在数据中不存在。可用列: {[str(c) for c in df.columns]}"
+        )
+    if agg_map:
+        return df.groupby(group_by, dropna=False).agg(agg_map).reset_index()
+    return df.groupby(group_by, dropna=False).size().reset_index(name="count")
+
+
+_ACTION_ALIASES = {
+    "groupby": "groupby", "group_by": "groupby", "aggregate": "groupby",
+    "summarize": "groupby", "summary": "groupby",
+    "汇总": "groupby", "统计": "groupby", "聚合": "groupby", "分组": "groupby",
+    "merge": "merge", "join": "merge", "合并": "merge", "关联": "merge",
+    "filter": "filter", "query": "filter", "where": "filter",
+    "筛选": "filter", "过滤": "filter", "查询": "filter",
+    "pivot": "pivot", "pivot_table": "pivot", "透视": "pivot", "透视图": "pivot",
+    "describe": "describe", "描述": "describe", "概览": "describe",
+}
+
+
 def execute_plan(
     plan: dict[str, Any], file_dfs: dict[str, pd.DataFrame]
 ) -> pd.DataFrame:
@@ -181,7 +221,8 @@ def execute_plan(
     file_dfs: {文件名 或 文件名::sheet名: DataFrame}
     支持的 action: groupby / merge / filter / pivot / describe
     """
-    action = plan.get("action", "groupby")
+    raw_action = str(plan.get("action") or "groupby").strip()
+    action = _ACTION_ALIASES.get(raw_action.casefold(), raw_action.casefold())
     files = plan.get("files_involved") or list(file_dfs.keys())
     # sheet 级别定位由 _resolve_frames 处理（含 "::sheet" 与宽松匹配）
     frames = _resolve_frames(files, file_dfs)
@@ -214,29 +255,15 @@ def execute_plan(
     df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
 
     if action == "groupby":
-        group_by = [str(g) for g in (plan.get("group_by") or [])]
-        if not group_by:
-            raise ValueError("groupby 操作缺少 group_by 维度")
-        agg_map: dict[str, str] = {}
-        for item in plan.get("aggregations", []):
-            if isinstance(item, dict):
-                agg_map[str(item.get("field", ""))] = _norm_agg_func(item.get("func", "sum"))
-            else:
-                agg_map[str(item)] = "sum"
-        agg_map.pop("", None)
-        # 只保留存在的字段
-        group_by = [g for g in group_by if g in df.columns]
-        agg_map = {k: v for k, v in agg_map.items() if k in df.columns}
-        if not group_by:
-            raise ValueError(
-                f"分组维度在数据中不存在。可用列: {[str(c) for c in df.columns]}"
-            )
-        if agg_map:
-            return df.groupby(group_by, dropna=False).agg(agg_map).reset_index()
-        return df.groupby(group_by, dropna=False).size().reset_index(name="count")
+        return _groupby(df, plan)
 
     if action == "filter":
-        expr = plan.get("expression") or "True"
+        expr = str(plan.get("expression") or "").strip()
+        # 占位/空表达式视为「不筛选」：计划里若带了 group_by 就转为分组汇总
+        if not expr or expr.casefold() in _NOOP_EXPRESSIONS:
+            if plan.get("group_by"):
+                return _groupby(df, plan)
+            return df
         return _apply_filter(df, expr)
 
     if action == "pivot":
@@ -261,7 +288,12 @@ def execute_plan(
     if action == "describe":
         return df.describe(include="all").reset_index()
 
-    raise ValueError(f"不支持的处理动作: {action}")
+    if action == "merge":
+        raise ValueError(
+            f"合并操作需要至少 2 个文件，当前只引用了 {len(frames)} 个"
+        )
+
+    raise ValueError(f"不支持的处理动作: {raw_action}")
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F6FB2")
