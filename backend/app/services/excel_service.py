@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -123,6 +124,55 @@ def _resolve_frames(
     return frames
 
 
+_DF_PREFIX_RE = re.compile(
+    r"\b(?:df|data|table|frame)\s*(?:\.\s*([^\W\d]\w*)|\[\s*(['\"])(.+?)\2\s*\])"
+)
+
+
+def _normalize_filter(expr: str) -> str:
+    """把 LLM 常写的 df['列'] / df.列 规范成 pandas query 可识别的列名。"""
+    def repl(m: re.Match[str]) -> str:
+        col = m.group(1) or m.group(3) or ""
+        return f"`{col}`" if col else ""
+
+    return _DF_PREFIX_RE.sub(repl, str(expr)).strip()
+
+
+def _apply_filter(df: pd.DataFrame, expr: str) -> pd.DataFrame:
+    """执行筛选表达式，兼容 df['列'] 写法并给出可读报错。"""
+    candidates = [expr]
+    normalized = _normalize_filter(expr)
+    if normalized and normalized != expr:
+        candidates.append(normalized)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return df.query(candidate, engine="python")
+        except Exception as e:  # 表达式/字段问题统一转成可读错误
+            last_error = e
+    raise ValueError(
+        f"筛选表达式无法执行: {expr}"
+        f"（可用列: {[str(c) for c in df.columns]}；原始错误: {last_error}）"
+    )
+
+
+_AGG_ALIASES = {
+    "sum": "sum", "求和": "sum", "合计": "sum", "总计": "sum", "总和": "sum", "累加": "sum",
+    "mean": "mean", "avg": "mean", "average": "mean", "平均": "mean", "均值": "mean", "平均值": "mean",
+    "count": "count", "计数": "count", "数量": "count", "个数": "count",
+    "max": "max", "最大": "max", "最大值": "max",
+    "min": "min", "最小": "min", "最小值": "min",
+    "median": "median", "中位数": "median",
+    "nunique": "nunique", "去重计数": "nunique", "唯一值": "nunique",
+}
+
+
+def _norm_agg_func(func: Any) -> str:
+    """把中文/别名聚合函数统一成 pandas 支持的函数名。"""
+    key = str(func or "sum").strip().casefold()
+    return _AGG_ALIASES.get(key, "sum")
+
+
 def execute_plan(
     plan: dict[str, Any], file_dfs: dict[str, pd.DataFrame]
 ) -> pd.DataFrame:
@@ -137,13 +187,28 @@ def execute_plan(
     frames = _resolve_frames(files, file_dfs)
 
     if action == "merge" and len(frames) >= 2:
-        keys = plan.get("join_keys") or []
-        result = frames[0]
+        keys = [str(k) for k in (plan.get("join_keys") or []) if str(k).strip()]
+        result = frames[0].copy()
         for nxt in frames[1:]:
+            other = nxt.copy()
             if keys:
-                result = result.merge(nxt, on=keys, how="left")
+                shared = [k for k in keys if k in result.columns and k in other.columns]
+                if not shared:
+                    raise ValueError(
+                        f"关联字段 {keys} 在数据中不存在或只有一侧存在。"
+                        f"左表列: {[str(c) for c in result.columns]}；"
+                        f"右表列: {[str(c) for c in other.columns]}"
+                    )
+                result = result.merge(other, on=shared, how="left")
             else:
-                result = result.merge(nxt, how="left")
+                common = [c for c in result.columns if c in other.columns]
+                if not common:
+                    raise ValueError(
+                        f"多个文件没有可用于合并的公共列。"
+                        f"左表列: {[str(c) for c in result.columns]}；"
+                        f"右表列: {[str(c) for c in other.columns]}"
+                    )
+                result = result.merge(other, on=common, how="left")
         return result
 
     df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
@@ -155,30 +220,41 @@ def execute_plan(
         agg_map: dict[str, str] = {}
         for item in plan.get("aggregations", []):
             if isinstance(item, dict):
-                agg_map[str(item["field"])] = str(item.get("func", "sum"))
+                agg_map[str(item.get("field", ""))] = _norm_agg_func(item.get("func", "sum"))
             else:
                 agg_map[str(item)] = "sum"
+        agg_map.pop("", None)
         # 只保留存在的字段
         group_by = [g for g in group_by if g in df.columns]
         agg_map = {k: v for k, v in agg_map.items() if k in df.columns}
         if not group_by:
-            raise ValueError("分组维度在数据中不存在")
+            raise ValueError(
+                f"分组维度在数据中不存在。可用列: {[str(c) for c in df.columns]}"
+            )
         if agg_map:
             return df.groupby(group_by, dropna=False).agg(agg_map).reset_index()
         return df.groupby(group_by, dropna=False).size().reset_index(name="count")
 
     if action == "filter":
         expr = plan.get("expression") or "True"
-        return df.query(expr, engine="python")
+        return _apply_filter(df, expr)
 
     if action == "pivot":
-        index = plan.get("group_by") or []
+        index = [str(i) for i in (plan.get("group_by") or []) if str(i) in df.columns]
+        if not index:
+            raise ValueError(
+                f"pivot 操作缺少有效的分组维度。可用列: {[str(c) for c in df.columns]}"
+            )
         values = [a["field"] for a in plan.get("aggregations", []) if isinstance(a, dict)]
-        funcs = [str(a.get("func", "sum")) for a in plan.get("aggregations", []) if isinstance(a, dict)]
+        funcs = [
+            _norm_agg_func(a.get("func", "sum"))
+            for a in plan.get("aggregations", [])
+            if isinstance(a, dict)
+        ]
         return df.pivot_table(
-            index=[str(i) for i in index if str(i) in df.columns],
+            index=index,
             values=[v for v in values if v in df.columns] or None,
-            aggfunc=funcs or "sum",
+            aggfunc=funcs[0] if len(funcs) == 1 else (funcs or "sum"),
             fill_value=0,
         ).reset_index()
 

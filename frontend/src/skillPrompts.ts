@@ -25,7 +25,10 @@ export const EXCEL_PLAN_SYSTEM_PROMPT = `你是数据分析助手。用户上传
 - 若用户的字段名与实际列名不一致，用最接近的实际列名，并在 ambiguities 中说明
 - 若需求明显不明确（如"帮我汇总一下"没有说明统计什么），ambiguities 必须列出问题
 - 多文件关联时 action 用 merge，join_keys 填公共字段
-- 单 sheet 文件的 files_involved 用文件名，多 sheet 文件用 "文件名::sheet名"`
+- 单 sheet 文件的 files_involved 用文件名，多 sheet 文件用 "文件名::sheet名"
+- expression 只写列名与数值/字符串的比较组合，例如 销售额 > 100 或 地区 == "华东"；
+  不要写 df[...] / df.列名，不要写代码块
+- 只能使用数据概况中真实存在的列名，不要臆造字段`
 
 export const EXCEL_SUMMARY_SYSTEM_PROMPT = `你是数据分析助手。请基于以下信息，用不超过3句中文总结结果，
 必须包含：做了什么处理、结果行数、1-2个关键数字结论。不要使用 markdown 列表。`
